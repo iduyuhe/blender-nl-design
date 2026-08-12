@@ -41,14 +41,24 @@ def parse_color(prompt, default=(0.8, 0.5, 0.2, 1.0)):
 # ---------- 材质：PBR（金属度/粗糙度）+ 视口色 ----------
 def apply_pbr(obj, color=(0.8, 0.5, 0.2, 1.0), metallic=0.1, roughness=0.6,
               name="NLMat"):
-    mat = bpy.data.materials.new(name=name)
-    mat.use_nodes = True
-    bsdf = mat.node_tree.nodes.get("Principled BSDF")
-    if bsdf is not None:
-        bsdf.inputs["Base Color"].default_value = (color[0], color[1], color[2], 1.0)
-        bsdf.inputs["Metallic"].default_value = metallic
-        bsdf.inputs["Roughness"].default_value = roughness
-    mat.diffuse_color = color
+    # 默认 name 时按颜色去重复用材质，避免每次生成都新建同名材质导致
+    # bpy.data.materials 无限累积（审计发现的内存增长隐患）。
+    if name == "NLMat":
+        try:
+            r, g, b = int(color[0] * 255), int(color[1] * 255), int(color[2] * 255)
+        except Exception:  # noqa: BLE001
+            r, g, b = 200, 128, 64
+        name = "NLMat_%02X%02X%02X" % (r, g, b)
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=name)
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf is not None:
+            bsdf.inputs["Base Color"].default_value = (color[0], color[1], color[2], 1.0)
+            bsdf.inputs["Metallic"].default_value = metallic
+            bsdf.inputs["Roughness"].default_value = roughness
+        mat.diffuse_color = color
     if obj.data.materials:
         obj.data.materials[0] = mat
     else:
@@ -361,11 +371,13 @@ def make_gearbox(w=2.0, h=1.5, d=1.5, color=(0.4, 0.5, 0.6, 1.0)):
 # ---------- 10) 有机体类 ----------
 def make_tree(height=3.0, color_trunk=(0.4, 0.28, 0.16, 1.0),
               color_leaf=(0.15, 0.5, 0.2, 1.0)):
+    parts = []
     bpy.ops.mesh.primitive_cylinder_add(
         radius=0.2, depth=height * 0.6, location=(0, 0, height * 0.3))
     trunk = bpy.context.active_object
     trunk.name = "TreeTrunk"
     apply_pbr(trunk, color=color_trunk)
+    parts.append(trunk)
     for i in range(3):
         r = 1.2 - i * 0.3
         bpy.ops.mesh.primitive_ico_sphere_add(
@@ -373,10 +385,9 @@ def make_tree(height=3.0, color_trunk=(0.4, 0.28, 0.16, 1.0),
         leaf = bpy.context.active_object
         leaf.name = "TreeLeaf%d" % i
         apply_pbr(leaf, color=color_leaf)
-    objs = [o for o in bpy.data.objects
-            if o.name == "TreeTrunk" or o.name.startswith("TreeLeaf")]
-    for o in objs:
-        o.select_set(True)
+        parts.append(leaf)
+    for p in parts:
+        p.select_set(True)
     bpy.context.view_layer.objects.active = trunk
     bpy.ops.object.join()
     bpy.context.view_layer.objects.active = trunk

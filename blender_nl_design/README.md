@@ -1,6 +1,6 @@
 # NL Blender Designer — 自然语言控制 Blender 设计系统
 
-用自然语言控制 Blender 建模的独立 Agent 系统。当前版本 **v0.9.0**（Phase A + Phase B 已交付，C1 自动化回归测试已落地；C2 EvolvIQ 可选上报钩子 + C3 本地语音输入已交付）。
+用自然语言控制 Blender 建模的独立 Agent 系统。当前版本 **v0.9.1**（Phase A + Phase B 已交付，C1 自动化回归测试已落地；C2 EvolvIQ 可选上报钩子 + C3 本地语音输入已交付；v0.9.1 修复「点击生成并建模没反应」）。
 
 ## 架构
 
@@ -158,3 +158,4 @@ voice_setup.bat
 - v0.8.0 Phase B：B1 造型库扩至 16 种（建筑/机械/有机体）+ B3 材质/环境预设 + B2 场景编排 + B4 原生后台渲染 job（主线程 INVOKE，杜绝子线程崩溃）
 - v0.8.0 + C1：新增自动化回归测试套件（`verify_backend.py` 离线 + `verify_in_blender.py` Blender headless，49 用例全绿），并由 headless 测试抓出修复 B1 造型库 `make_house`/`make_tower` 的 cone operator 参数错误
 - v0.9.0 Phase C：C2 新增 EvolvIQ 网关可选上报钩子（配置门控、best-effort、不耦合内核；`verify_backend` 第 [9] 组守护）；C3 新增本地语音输入（Vosk 离线中文识别，子进程执行 + 主线程 timers 轮询，严守 Blender 线程铁律）；顺带修复 Blender 4.5 引擎枚举改名（`BLENDER_EEVEE`→`BLENDER_EEVEE_NEXT`）导致的渲染回退失效，真机 headless 回归 50/50 全绿且真渲染不崩
+- v0.9.1 修复「点击生成并建模没反应」：根因=主线程同步 `urllib.urlopen` 冻结 UI（非后端未连）。全链路异步化（后台线程取码 + 主线程 `bpy.app.timers` 轮询执行），Generate/Refine/SmartGenerate 三算子 `invoke` 瞬间返回、UI 不再冻结；新增 `NLDesign_OT_ConfirmRisky` 风险确认弹窗算子；插件 `TIMEOUT` 30→45s、后端 LLM `timeout` 60→40s、后端 `HTTPServer`→`ThreadingHTTPServer`；异步回调改模块级函数规避 StructRNA 实例已销毁的 `ReferenceError`。`verify_in_blender.py` 49/49 + `verify_backend.py` 9 组全绿

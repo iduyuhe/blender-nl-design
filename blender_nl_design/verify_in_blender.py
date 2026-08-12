@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""真 Blender 端到端 + headless 回归套件（NL Blender Designer v0.9.0）。
+"""真 Blender 端到端 + headless 回归套件（NL Blender Designer v0.9.1）。
 
 用途：在 Blender 内一键验证「自然语言 -> bpy 代码 -> 真实执行」全链路不崩、不退化。
       - 默认 USE_LLM = False：离线模板生成器（不消耗 API 额度，无需启动 agent_server）。
@@ -19,6 +19,9 @@
 """
 import os
 import sys
+import time
+import json
+import threading
 
 # ---------- 定位项目目录（与本脚本同目录，或环境变量 BLENDER_NL_DIR 指定） ----------
 _HERE = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else ""
@@ -31,6 +34,81 @@ import bpy  # noqa: E402 (Blender 内可用)
 import nl_blender_design as plug  # noqa: E402 (复用插件沙箱，保证测试=实际执行路径)
 import agent_server as ag  # noqa: E402 (共用离线模板生成器)
 import shape_library as nl_shapes  # noqa: E402
+
+
+# ---------- 异步算子真实链路测试专用：内嵌 mock Agent 后端 + timer 手动驱动 ----------
+# 说明：headless（--background）下 bpy.app.timers 不会自动触发，因此无法直接走
+#       "算子 invoke -> 后台线程取码 -> timer 回调" 的真实异步路径。
+#       这里用 _async_poll 手动驱动（等价于主线程 timer 回调），真实覆盖：
+#       ① HTTP 取码在【后台线程】(主线程不阻塞) ② 回调在主线程安全执行建模。
+#       这正是「点击生成并建模没反应」修复所守护的核心机制。
+_MOCK_CODE = (
+    "import bpy\n"
+    "bpy.ops.mesh.primitive_cube_add(size=1.0, location=(9, 9, 9))\n"
+)
+
+
+def _start_mock_agent():
+    """启动一个本地 mock Agent 后端（completion/evaluate 双路由），返回 (server, port)。"""
+    import http.server
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def _send(self, obj):
+            body = json.dumps(obj).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if self.path.endswith("/evaluate"):
+                # SmartGenerate 评估闭环：直接判通过，使一轮即交付
+                self._send({"pass": True, "issues": []})
+            else:
+                self._send({"code": _MOCK_CODE, "explanation": "mock cube", "error": ""})
+
+        def log_message(self, *a):  # 静默
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, port
+
+
+def pump_token(token, timeout=15):
+    """手动驱动单个异步 job 的 poll（模拟主线程 timer 回调）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        j = plug._async_jobs.get(token)
+        if j is None:
+            return  # 已被 poll 消费（完成）
+        if j["done"] or time.time() > j["deadline"]:
+            plug._async_poll(token)
+            return
+        time.sleep(0.02)
+
+
+def pump_all_async(timeout=30):
+    """通用驱动：覆盖多轮异步（如 SmartGenerate 的 completion->evaluate 链路）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        tokens = list(plug._async_jobs.keys())
+        if not tokens:
+            time.sleep(0.05)
+            if not plug._async_jobs:
+                break
+            continue
+        for tk in tokens:
+            j = plug._async_jobs.get(tk)
+            if j is None:
+                continue
+            if j["done"] or time.time() > j["deadline"]:
+                plug._async_poll(tk)
+        if not plug._async_jobs:
+            break
+        time.sleep(0.02)
 
 # 强制离线：清空 key，避免联网耗额度/超时
 ag.CONFIG["api_key"] = ""
@@ -219,10 +297,74 @@ def test_plugin_contract():
         check("插件 register（历史测试前置）", False, "无法注册插件")
 
 
+# ---------- [7] 异步算子真实链路（Generate）：后台线程取码 + 主线程回调执行 ----------
+def test_async_generate_real_path():
+    section("[7] 异步算子真实链路（Generate）：后台线程取码 + 主线程回调执行")
+    if not ensure_registered():
+        check("[7] 前置插件注册", False, "无法注册插件")
+        return
+    srv, port = _start_mock_agent()
+    old_base = plug.AGENT_BASE_URL
+    plug.AGENT_BASE_URL = "http://127.0.0.1:%d" % port
+    try:
+        before = count_meshes()
+        token = "audit_gen_%f" % time.time()
+
+        def on_done(result):
+            code, exp, err = result
+            p = bpy.context.scene.nl_design
+            if err:
+                p.last_status = err
+                return
+            if not code.strip():
+                p.last_status = "empty"
+                return
+            # 复用算子原生风险闸门与执行路径（与「点击生成并建模」完全一致）
+            plug._run_and_report(code, exp)
+
+        # 等价于算子 invoke：异步取码（HTTP 在后台线程，主线程不阻塞）
+        plug._async_request_code("做一个测试立方体", plug.get_scene_state(), token, on_done, 15)
+        pump_token(token, timeout=15)
+        after = count_meshes()
+        check("异步取码+主线程回调创建对象(Generate链路)", after > before,
+              "before=%d after=%d" % (before, after))
+    finally:
+        plug.AGENT_BASE_URL = old_base
+        srv.shutdown()
+
+
+# ---------- [8] 异步算子真实链路（SmartGenerate）：含评估闭环(A1) ----------
+def test_async_smart_generate_real_path():
+    section("[8] 智能生成(SmartGenerate)真实异步链路 + 评估闭环(A1)")
+    if not ensure_registered():
+        check("[8] 前置插件注册", False, "无法注册插件")
+        return
+    srv, port = _start_mock_agent()
+    old_base = plug.AGENT_BASE_URL
+    plug.AGENT_BASE_URL = "http://127.0.0.1:%d" % port
+    try:
+        before = count_meshes()
+        token = "audit_smart_%f" % time.time()
+
+        def on_done(result):
+            # 与 SmartGenerate.invoke 的真实回调完全一致
+            plug._smart_on_code(result, "做一个测试立方体", 0)
+
+        plug._async_request_code("做一个测试立方体", plug.get_scene_state(), token, on_done, 30)
+        pump_all_async(timeout=30)  # 多轮：completion -> evaluate(pass) -> 交付
+        after = count_meshes()
+        check("SmartGenerate 真实链路完成(含评估闭环)",
+              after > before and not plug._async_jobs,
+              "before=%d after=%d jobs_left=%d" % (before, after, len(plug._async_jobs)))
+    finally:
+        plug.AGENT_BASE_URL = old_base
+        srv.shutdown()
+
+
 # ---------- 主流程 ----------
 def main():
     print("=" * 68)
-    print("NL Blender Designer v0.9.0 —— Blender 端到端/headless 回归套件")
+    print("NL Blender Designer v0.9.1 —— Blender 端到端/headless 回归套件")
     print("  模式: %s" % ("离线模板（不联网）" ))
     print("  真渲染: %s" % ("开启(NL_RENDER_TEST=1)" if DO_REAL_RENDER else "关闭（SKIP）"))
     print("=" * 68)
@@ -234,6 +376,8 @@ def main():
     test_nl_pipeline()
     test_render()
     test_plugin_contract()
+    test_async_generate_real_path()
+    test_async_smart_generate_real_path()
 
     after_total = len(bpy.data.objects)
     all_ok = all(_results)

@@ -27,7 +27,7 @@ import re
 import base64
 import urllib.request
 import urllib.error
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 # 参数化造型库：复杂造型确定性函数（被插件与后端共用；后端进程无 bpy 也能 import）
 try:
@@ -103,7 +103,8 @@ def report_to_gateway(event, data=None):
             },
             method="POST",
         )
-        urllib.request.urlopen(req, timeout=5)
+        with urllib.request.urlopen(req, timeout=5) as _resp:
+            _ = _resp.read()
     except Exception:
         # 上报失败不影响主服务
         pass
@@ -534,7 +535,7 @@ def call_llm(prompt, context=None):
         "Authorization": "Bearer " + CONFIG["api_key"],
     })
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=40) as resp:
             j = json.loads(resp.read().decode("utf-8"))
         content = j["choices"][0]["message"]["content"]
         return extract_code(content), ""
@@ -556,30 +557,11 @@ def _evaluate_offline(prompt, scene_state, image):
 
 
 def call_evaluate(prompt, scene_state=None, image=None):
-    """返回 {"pass": bool, "issues": [str]}。vision 开启且带图时调用视觉模型，否则用离线判定。"""
+    """返回 {"pass": bool, "issues": [str]}。有 key 时让 LLM 基于场景状态 JSON
+    （+可选视觉图，需 vision=true）做质检；无 key / 调用失败则离线判定。"""
     if not CONFIG.get("api_key"):
         return _evaluate_offline(prompt, scene_state, image)
-    if not image or not CONFIG.get("vision"):
-        # 没有视觉输入时，仍让 LLM 基于场景状态 JSON 做判断（比离线更聪明）
-        try:
-            url = CONFIG["base_url"].rstrip("/") + CONFIG["endpoint"]
-            payload = {
-                "model": CONFIG["model"],
-                "messages": _build_messages(prompt, {
-                    "mode": "evaluate", "scene_state": scene_state, "image": image}),
-                "temperature": 0.1,
-            }
-            data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=data, headers={
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + CONFIG["api_key"],
-            })
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                content = json.loads(resp.read().decode("utf-8"))["choices"][0]["message"]["content"]
-            return _parse_eval_json(content)
-        except Exception:
-            return _evaluate_offline(prompt, scene_state, image)
-    # 带视觉图 + vision=true：多模态判断
+    # 有 key：统一走 LLM 质检（是否附带视觉图由 _build_messages 内部按 vision 门控）。
     try:
         url = CONFIG["base_url"].rstrip("/") + CONFIG["endpoint"]
         payload = {
@@ -593,7 +575,7 @@ def call_evaluate(prompt, scene_state=None, image=None):
             "Content-Type": "application/json",
             "Authorization": "Bearer " + CONFIG["api_key"],
         })
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=40) as resp:
             content = json.loads(resp.read().decode("utf-8"))["choices"][0]["message"]["content"]
         return _parse_eval_json(content)
     except Exception:
@@ -668,4 +650,6 @@ if __name__ == "__main__":
     print("Blender Design Agent (LLM) -> http://%s:%s/v1/agent/completion" % (HOST, PORT))
     print("model: %s | base_url: %s | vision: %s" % (
         CONFIG["model"], CONFIG["base_url"], CONFIG.get("vision")))
-    HTTPServer((HOST, PORT), Handler).serve_forever()
+    # ThreadingHTTPServer：单线程 HTTPServer 会在慢 LLM 请求期间阻塞后续请求
+    # （重试/并发点击会排队），改为多线程，避免「点击无响应」被放大。
+    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

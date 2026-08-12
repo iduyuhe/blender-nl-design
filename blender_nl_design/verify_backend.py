@@ -175,7 +175,7 @@ def test_evolviq_report():
 
 def main():
     print("=" * 68)
-    print("NL Blender Designer v0.9.0 —— 后端离线回归测试（不依赖 Blender）")
+    print("NL Blender Designer v0.9.1 —— 后端离线回归测试（不依赖 Blender）")
     print("=" * 68)
     results = [
         test_extract_code(),
