@@ -1,0 +1,15 @@
+# NL Blender Designer — 依赖说明
+#
+# 主程序（agent_server.py / nl_blender_design.py / shape_library.py）
+# 仅使用 Python 标准库，无需安装任何第三方包即可运行。
+#
+# 以下依赖仅供【可选】的 C3 本地语音输入模块使用，
+# 由 blender_nl_design/voice_setup.py 自动创建独立 venv 并安装，
+# 不会污染 Blender 自带 Python 与系统环境。一般用户无需手动安装。
+#
+# 如需手动为语音 venv 安装，可在 voice_setup 创建的 venv 中执行：
+#   pip install -r requirements.txt
+
+vosk>=0.3.45
+sounddevice>=0.4.6
+numpy>=1.24.0
