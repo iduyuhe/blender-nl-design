@@ -1,0 +1,21 @@
+# ===== 工具 / 环境数据（不入库）=====
+.workbuddy/
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== 密钥（绝不入库）=====
+config.json
+*.key
+*.secret
+
+# ===== 运行 / 测试产物 =====
+*.log
+
+# ===== 临时 / 中间文件 =====
+blender_addons_dirty_check.txt
+.DS_Store
+Thumbs.db
+
+# ===== 本地模型缓存（用户自行下载，不入仓）=====
+# Vosk 模型位于用户 home，不在此仓库内
